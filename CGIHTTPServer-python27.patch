@@ -1,0 +1,79 @@
+# Make CGIHTTPServer capable of redirects (and status other than 200)
+# <http://bugs.python.org/issue13893>
+--- /usr/lib/python2.7/CGIHTTPServer.py	2011-10-04 22:24:00.000000000 +0100
++++ CGIHTTPServer.py	2012-01-27 22:38:01.785587952 +0000
+@@ -30,6 +30,7 @@
+ import SimpleHTTPServer
+ import select
+ import copy
++import re
+ 
+ 
+ class CGIHTTPRequestHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
+@@ -218,8 +219,6 @@
+                   'HTTP_USER_AGENT', 'HTTP_COOKIE', 'HTTP_REFERER'):
+             env.setdefault(k, "")
+ 
+-        self.send_response(200, "Script output follows")
+-
+         decoded_query = query.replace('+', ' ')
+ 
+         if self.have_fork:
+@@ -229,10 +228,23 @@
+                 args.append(decoded_query)
+             nobody = nobody_uid()
+             self.wfile.flush() # Always flush before forking
++            r, w = os.pipe()
+             pid = os.fork()
+             if pid != 0:
+                 # Parent
++                os.close(w)
+                 pid, sts = os.waitpid(pid, 0)
++                # read and translate status header
++                r = os.fdopen(r)
++                data = r.readline()
++                status = re.match('Status: ([0-9]+) (.+)', data)
++                if status:
++                    self.send_response(int(status.group(1)), status.group(2))
++                else:
++                    self.send_response(200, 'OK')
++                    self.wfile.write(data)
++                # pipe rest of contents
++                self.wfile.write(r.read())
+                 # throw away additional data [see bug #427345]
+                 while select.select([self.rfile], [], [], 0)[0]:
+                     if not self.rfile.read(1):
+@@ -242,12 +254,13 @@
+                 return
+             # Child
+             try:
++                os.close(r)
+                 try:
+                     os.setuid(nobody)
+                 except os.error:
+                     pass
+                 os.dup2(self.rfile.fileno(), 0)
+-                os.dup2(self.wfile.fileno(), 1)
++                os.dup2(w, 1)
+                 os.execve(scriptfile, args, env)
+             except:
+                 self.server.handle_error(self.request, self.client_address)
+@@ -285,8 +298,16 @@
+             while select.select([self.rfile._sock], [], [], 0)[0]:
+                 if not self.rfile._sock.recv(1):
+                     break
+-            stdout, stderr = p.communicate(data)
+-            self.wfile.write(stdout)
++            r, stderr = p.communicate(data)
++            data = r.split('\n', 1)
++            status = re.match('Status: ([0-9]+) (.+)', data[0])
++            if status:
++                self.send_response(int(status.group(1)), status.group(2))
++            else:
++                self.send_response(200, 'OK')
++                self.wfile.write(data[0]+'\n')
++            # pipe rest of contents
++            self.wfile.write(data[1])
+             if stderr:
+                 self.log_error('%s', stderr)
+             p.stderr.close()
